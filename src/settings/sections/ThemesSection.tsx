@@ -1,28 +1,52 @@
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
+  EDITOR_THEME_AUTO,
+  EDITOR_THEME_LABELS,
+  EDITOR_THEME_MODE,
+  EDITOR_THEMES,
+  type EditorThemePref,
   setBackgroundBlur,
   setBackgroundImageId,
   setBackgroundKind,
   setBackgroundOpacity,
+  setEditorTheme,
+  setWindowVibrancy,
 } from "@/modules/settings/store";
 import { useTheme } from "@/modules/theme";
 import {
   deleteBgImage,
   importBgImageFromFile,
 } from "@/modules/theme/bgImageStore";
-import { deleteCustomTheme, saveCustomTheme } from "@/modules/theme/customThemes";
-import { listBuiltinThemes } from "@/modules/theme/themes";
-import { validateTheme } from "@/modules/theme/validateTheme";
+import {
+  deleteCustomTheme,
+  saveCustomTheme,
+} from "@/modules/theme/customThemes";
 import { deleteThemeFile, emitThemeEdit } from "@/modules/theme/themeFiles";
+import { listBuiltinThemes } from "@/modules/theme/themes";
 import { DEFAULT_THEME_ID } from "@/modules/theme/types";
+import { validateTheme } from "@/modules/theme/validateTheme";
+import {
+  type Backdrop,
+  getBackdropKind,
+} from "@/modules/theme/vibrancy";
 import { Edit02Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
+import { SettingRow } from "../components/SettingRow";
 
 export function ThemesSection() {
   const { themeId, setThemeId, resolvedMode, customThemes } = useTheme();
@@ -51,10 +75,23 @@ export function ThemesSection() {
     void getCurrentWindow().hide();
   };
 
+  const editorThemePref = usePreferencesStore((s) => s.editorTheme);
   const backgroundKind = usePreferencesStore((s) => s.backgroundKind);
   const backgroundImageId = usePreferencesStore((s) => s.backgroundImageId);
   const backgroundOpacity = usePreferencesStore((s) => s.backgroundOpacity);
   const backgroundBlur = usePreferencesStore((s) => s.backgroundBlur);
+  const windowVibrancy = usePreferencesStore((s) => s.windowVibrancy);
+
+  const [backdrop, setBackdrop] = useState<Backdrop>("none");
+  useEffect(() => {
+    let alive = true;
+    void getBackdropKind().then((k) => {
+      if (alive) setBackdrop(k);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const handleThemeFiles = async (files: FileList | null) => {
     setImportError(null);
@@ -123,7 +160,24 @@ export function ThemesSection() {
         description="Theme, background image, and customization."
       />
 
+      {backdrop === "none" ? null : (
+        <SettingRow
+          title={backdrop === "mica" ? "Mica background" : "Window vibrancy"}
+          description={
+            backdrop === "mica"
+              ? "Blend the header, status bar and gutters into the desktop wallpaper. Windows 11 only."
+              : "Frost the header, status bar and gutters over what is behind the window. Panes stay solid."
+          }
+        >
+          <Switch
+            checked={windowVibrancy}
+            onCheckedChange={(v) => void setWindowVibrancy(v)}
+          />
+        </SettingRow>
+      )}
+
       <div
+        role="presentation"
         className="flex flex-col gap-2"
         onDragOver={(e) => {
           e.preventDefault();
@@ -232,7 +286,11 @@ export function ThemesSection() {
                         onEditTheme(t.id);
                       }}
                     >
-                      <HugeiconsIcon icon={Edit02Icon} size={12} strokeWidth={1.75} />
+                      <HugeiconsIcon
+                        icon={Edit02Icon}
+                        size={12}
+                        strokeWidth={1.75}
+                      />
                     </span>
                     <span
                       role="button"
@@ -253,7 +311,49 @@ export function ThemesSection() {
         </div>
       </div>
 
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-col">
+            <Label>Editor theme</Label>
+            <span className="text-[11px] text-muted-foreground">
+              Syntax colors for the code editor. Auto follows the app theme.
+            </span>
+          </div>
+          <Select
+            value={editorThemePref}
+            onValueChange={(v) => void setEditorTheme(v as EditorThemePref)}
+          >
+            <SelectTrigger size="sm" className="h-8 w-44 text-[12px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={EDITOR_THEME_AUTO} className="text-[12px]">
+                Auto (match app theme)
+              </SelectItem>
+              <SelectSeparator />
+              {[...EDITOR_THEMES]
+                .sort(
+                  (a, b) =>
+                    (EDITOR_THEME_MODE[a] === resolvedMode ? 0 : 1) -
+                    (EDITOR_THEME_MODE[b] === resolvedMode ? 0 : 1),
+                )
+                .map((id) => (
+                  <SelectItem
+                    key={id}
+                    value={id}
+                    disabled={EDITOR_THEME_MODE[id] !== resolvedMode}
+                    className="text-[12px]"
+                  >
+                    {EDITOR_THEME_LABELS[id]}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
       <div
+        role="presentation"
         className="flex flex-col gap-2"
         onDragOver={(e) => {
           e.preventDefault();

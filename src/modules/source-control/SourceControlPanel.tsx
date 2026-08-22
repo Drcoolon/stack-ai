@@ -10,7 +10,24 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
+import { toast } from "sonner";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Tooltip,
@@ -20,7 +37,17 @@ import {
 } from "@/components/ui/tooltip";
 import { IS_MAC } from "@/lib/platform";
 import { cn } from "@/lib/utils";
+import { type GitBranchEntry, native } from "@/modules/ai/lib/native";
+import {
+  copyToClipboard,
+  revealInFinder,
+} from "@/modules/explorer/lib/contextActions";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
+import {
+  COMPACT_CONTENT,
+  COMPACT_ITEM,
+} from "@/modules/explorer/lib/menuItemClass";
+import { joinPath } from "@/modules/explorer/lib/useFileTree";
 import {
   AiContentGenerator02Icon,
   Alert02Icon,
@@ -29,11 +56,13 @@ import {
   ArrowUp01Icon,
   CheckmarkCircle01Icon,
   Download01Icon,
+  Folder01Icon,
   FolderCloudIcon,
   FolderGitTwoIcon,
   GitBranchIcon,
   Refresh01Icon,
   RemoveSquareIcon,
+  Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -47,6 +76,10 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import {
+  repositoryTargetIsPending,
+  type SourceControlRepositoryTarget,
+} from "./repositoryTarget";
 import type { SourceControlSummary } from "./useSourceControl";
 import {
   useSourceControlPanel,
@@ -65,6 +98,10 @@ type Props = {
     originalPath: string | null;
     title?: string;
   }) => void;
+  onOpenFile?: (absolutePath: string) => void;
+  onNavigateToPath?: (path: string) => void;
+  repositoryTarget: SourceControlRepositoryTarget;
+  onFollowRepositoryContext: () => void;
 };
 
 const SOURCE_CONTROL_TOOLTIP_CLASS =
@@ -126,11 +163,239 @@ function checkboxValue(state: CheckState): boolean | "indeterminate" {
   return false;
 }
 
+function BranchDropdown({
+  repoRoot,
+  repoLabel,
+  displayRepoRoot,
+  repositoryTarget,
+  onFollowRepositoryContext,
+  onNavigateToPath,
+  onRefresh,
+}: {
+  repoRoot: string | null;
+  repoLabel: string;
+  displayRepoRoot: string | null;
+  repositoryTarget: SourceControlRepositoryTarget;
+  onFollowRepositoryContext: () => void;
+  onNavigateToPath?: (path: string) => void;
+  onRefresh: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [branches, setBranches] = useState<GitBranchEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [checkingOut, setCheckingOut] = useState(false);
+  const requestRef = useRef(0);
+  const checkoutInFlight = useRef(false);
+
+  const loadBranches = useCallback(async () => {
+    const id = ++requestRef.current;
+    if (!repoRoot) {
+      setBranches([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await native.gitListBranches(repoRoot);
+      if (id !== requestRef.current) return;
+      setBranches(result.branches);
+    } catch (e) {
+      if (id !== requestRef.current) return;
+      setError(String(e));
+      setBranches([]);
+    } finally {
+      if (id === requestRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [repoRoot]);
+
+  useEffect(() => {
+    if (open) {
+      void loadBranches();
+    }
+  }, [open, loadBranches]);
+
+  const handleCheckout = useCallback(
+    async (branch: string) => {
+      if (!repoRoot || checkoutInFlight.current) return;
+      checkoutInFlight.current = true;
+      setCheckingOut(true);
+      try {
+        await native.gitCheckoutBranch(repoRoot, branch);
+        setBranches([]);
+        setOpen(false);
+        onRefresh();
+      } catch (e) {
+        toast.error(String(e));
+      } finally {
+        checkoutInFlight.current = false;
+        setCheckingOut(false);
+      }
+    },
+    [repoRoot, onRefresh],
+  );
+
+  const localBranches = useMemo(
+    () => branches.filter((b) => b.kind === "local"),
+    [branches],
+  );
+  const worktrees = useMemo(
+    () => branches.filter((b) => b.kind === "worktree"),
+    [branches],
+  );
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={checkingOut}
+          title={displayRepoRoot ?? repoLabel}
+          className="inline-flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md bg-foreground/5 px-2 py-1 text-[11.5px] font-medium leading-none text-foreground transition-colors hover:bg-foreground/10 disabled:cursor-default disabled:opacity-70"
+        >
+          <HugeiconsIcon
+            icon={FolderGitTwoIcon}
+            size={12}
+            strokeWidth={1.9}
+            className="shrink-0 text-muted-foreground"
+          />
+          {displayRepoRoot ? (
+            <>
+              <span className="max-w-22 truncate">
+                {basename(displayRepoRoot)}
+              </span>
+              <span className="text-muted-foreground/60">/</span>
+            </>
+          ) : null}
+          <span className="max-w-24 truncate">{repoLabel}</span>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-56">
+        {displayRepoRoot ? (
+          <>
+            <DropdownMenuLabel className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/85">
+              Repository
+            </DropdownMenuLabel>
+            <div
+              className="truncate px-2 pb-1.5 text-[11px] text-muted-foreground"
+              title={displayRepoRoot}
+            >
+              {displayRepoRoot}
+            </div>
+            {repositoryTarget.mode === "fixed" ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  onFollowRepositoryContext();
+                  setOpen(false);
+                }}
+                className="cursor-pointer text-[12px]"
+              >
+                Follow Active Context
+              </DropdownMenuItem>
+            ) : null}
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
+        {loading ? (
+          <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-muted-foreground">
+            <Spinner className="size-3" />
+            Loading branches…
+          </div>
+        ) : error ? (
+          <div className="px-3 py-3 text-[11px] leading-snug text-destructive">
+            {error}
+          </div>
+        ) : (
+          <>
+            {localBranches.length > 0 && (
+              <>
+                <DropdownMenuLabel className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/85">
+                  Local Branches
+                </DropdownMenuLabel>
+                <DropdownMenuGroup>
+                  {localBranches.map((b) => (
+                    <DropdownMenuItem
+                      key={b.name}
+                      onSelect={() => void handleCheckout(b.name)}
+                      className="flex cursor-pointer items-center gap-2 text-[12px]"
+                    >
+                      {b.isHead ? (
+                        <HugeiconsIcon
+                          icon={Tick02Icon}
+                          size={14}
+                          strokeWidth={1.8}
+                          className="shrink-0"
+                        />
+                      ) : (
+                        <span className="w-3.5 shrink-0" />
+                      )}
+                      <span className="min-w-0 flex-1 truncate">{b.name}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </>
+            )}
+            {worktrees.length > 0 && (
+              <>
+                {localBranches.length > 0 && <DropdownMenuSeparator />}
+                <DropdownMenuLabel className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/85">
+                  Worktrees
+                </DropdownMenuLabel>
+                <DropdownMenuGroup>
+                  {worktrees.map((b) => (
+                    <DropdownMenuItem
+                      key={b.worktreePath ?? b.name}
+                      onSelect={() => {
+                        if (b.worktreePath && onNavigateToPath) {
+                          onNavigateToPath(b.worktreePath);
+                        }
+                      }}
+                      className="flex cursor-pointer items-center gap-2 text-[12px]"
+                    >
+                      <HugeiconsIcon
+                        icon={Folder01Icon}
+                        size={14}
+                        strokeWidth={1.5}
+                        className="shrink-0 text-muted-foreground"
+                      />
+                      <div className="flex min-w-0 flex-col">
+                        <span className="truncate">{b.name}</span>
+                        {b.worktreePath && (
+                          <span className="truncate text-[10px] text-muted-foreground">
+                            {b.worktreePath}
+                          </span>
+                        )}
+                      </div>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </>
+            )}
+            {branches.length === 0 && (
+              <div className="px-3 py-3 text-[11px] text-muted-foreground">
+                No branches found.
+              </div>
+            )}
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export const SourceControlPanel = memo(function SourceControlPanel({
   open,
   sourceControl,
   onOpenGitGraph,
   onOpenDiff,
+  onOpenFile,
+  onNavigateToPath,
+  repositoryTarget,
+  onFollowRepositoryContext,
 }: Props) {
   const scm = useSourceControlPanel(open, sourceControl, onOpenDiff);
   const refreshAnimationRef = useRef<number | null>(null);
@@ -147,17 +412,26 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     };
   }, []);
 
-  const isRefreshing = scm.panelState === "loading";
+  const fixedTargetPending = repositoryTargetIsPending({
+    target: repositoryTarget,
+    loadedContextPath: sourceControl.contextPath,
+    loadedRepoRoot: sourceControl.repo?.repoRoot ?? null,
+    isLoading: sourceControl.isLoading,
+  });
+  const panelState = fixedTargetPending ? "loading" : scm.panelState;
+  const isRefreshing = panelState === "loading";
   const repoLabel = useMemo(() => {
+    if (fixedTargetPending) return "Loading";
     if (!scm.status) return "Source Control";
     return scm.status.isDetached ? "detached" : scm.status.branch;
-  }, [scm.status]);
+  }, [fixedTargetPending, scm.status]);
 
   const commitShortcut = IS_MAC ? "⌘↩" : "Ctrl+Enter";
   const generateShortcut = IS_MAC ? "⌘G" : "Ctrl+G";
   const canCommit =
     scm.stagedEntries.length > 0 &&
     scm.commitMessage.trim().length > 0 &&
+    !fixedTargetPending &&
     !scm.actionBusy;
   const commitDisabledReason = scm.actionBusy
     ? "Wait for the current Git action to finish."
@@ -170,9 +444,11 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     ? `Commit with ${commitShortcut}.`
     : (commitDisabledReason ?? `Commit with ${commitShortcut}.`);
   const pushHint = scm.pushHint ?? "Push is unavailable right now.";
-  const pushDisabledReason = scm.actionBusy
-    ? "Wait for the current Git action to finish."
-    : pushHint;
+  const pushDisabledReason = fixedTargetPending
+    ? "Wait for the selected repository to finish loading."
+    : scm.actionBusy
+      ? "Wait for the current Git action to finish."
+      : pushHint;
   const stagedCount = scm.stagedEntries.length;
   const changedCount = scm.fileEntries.length;
   const pushStatusLabel = upstreamBadgeLabel(scm.status?.upstream);
@@ -185,9 +461,14 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     !!scm.status &&
     scm.status.behind > 0 &&
     !isDiverged &&
+    !fixedTargetPending &&
     !scm.actionBusy &&
     !sourceControl.busyAction;
-  const canFetch = hasUpstream && !scm.actionBusy && !sourceControl.busyAction;
+  const canFetch =
+    hasUpstream &&
+    !fixedTargetPending &&
+    !scm.actionBusy &&
+    !sourceControl.busyAction;
 
   const footerFeedback = useMemo(() => {
     if (scm.actionError)
@@ -398,18 +679,24 @@ export const SourceControlPanel = memo(function SourceControlPanel({
 
   return (
     <TooltipProvider delayDuration={800} skipDelayDuration={300}>
-      <aside className="flex h-full min-w-0 flex-col bg-card/80 backdrop-blur [contain:layout_style]">
+      <aside className="flex h-full min-w-0 flex-col [contain:layout_style]">
         <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3 pb-2.5 pt-3">
           <div className="flex min-w-0 items-center gap-1.5">
-            <div className="inline-flex min-w-0 items-center gap-1.5 rounded-md bg-foreground/5 px-2 py-1 text-[11.5px] font-medium leading-none text-foreground transition-colors hover:bg-foreground/10">
-              <HugeiconsIcon
-                icon={FolderGitTwoIcon}
-                size={12}
-                strokeWidth={1.9}
-                className="shrink-0 text-muted-foreground"
-              />
-              <span className="max-w-[140px] truncate">{repoLabel}</span>
-            </div>
+            <BranchDropdown
+              repoRoot={
+                fixedTargetPending ? null : (scm.repo?.repoRoot ?? null)
+              }
+              repoLabel={repoLabel}
+              displayRepoRoot={
+                repositoryTarget.mode === "fixed"
+                  ? repositoryTarget.repoRoot
+                  : (scm.repo?.repoRoot ?? null)
+              }
+              repositoryTarget={repositoryTarget}
+              onFollowRepositoryContext={onFollowRepositoryContext}
+              onNavigateToPath={onNavigateToPath}
+              onRefresh={handleRefresh}
+            />
             {scm.status && (scm.status.ahead > 0 || scm.status.behind > 0) ? (
               <div className="flex shrink-0 items-center gap-0.5 text-[10px] font-semibold tabular-nums leading-none text-muted-foreground">
                 {scm.status.ahead > 0 ? (
@@ -525,18 +812,18 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           </button>
         ) : null}
 
-        {scm.panelState === "loading" ? (
+        {panelState === "loading" ? (
           <PanelCenter title="Loading repository" />
         ) : null}
 
-        {scm.panelState === "no-repo" ? (
+        {panelState === "no-repo" ? (
           <PanelCenter
             title="No repository"
             body="The active workspace is not inside a Git repository."
           />
         ) : null}
 
-        {scm.panelState === "error" ? (
+        {panelState === "error" ? (
           <PanelCenter
             title="Source control error"
             body={scm.statusError ?? "Unknown source control error"}
@@ -548,7 +835,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           />
         ) : null}
 
-        {scm.panelState === "ready" && scm.status ? (
+        {panelState === "ready" && scm.status ? (
           <>
             <div className="relative shrink-0 space-y-2 border-b border-border/40 bg-gradient-to-b from-card/65 to-card/30 px-2.5 pb-2.5 pt-2.5">
               <div
@@ -567,7 +854,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                   placeholder="Commit message"
                   rows={3}
                   className={cn(
-                    "min-h-[72px] border-  resize-none rounded-lg  bg-transparent px-3 pb-7 pt-2.5 text-[12.5px] leading-snug shadow-none placeholder:text-muted-foreground/65 focus-visible:ring-0 focus:border-0",
+                    "min-h-[72px] border-border resize-none rounded-lg bg-transparent px-3 pb-7 pt-2.5 text-[12.5px] leading-snug shadow-none placeholder:text-muted-foreground/65 focus-visible:ring-0 focus:border-0",
                   )}
                 />
                 <div className="pointer-events-none absolute inset-x-3 bottom-1.5 flex items-center justify-between p-1 gap-2 text-[10px] tabular-nums text-muted-foreground/55">
@@ -666,7 +953,9 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                       size="xs"
                       variant="secondary"
                       className="h-7 cursor-pointer text-[11.5px] font-medium disabled:cursor-not-allowed"
-                      disabled={!scm.canPush || !!scm.actionBusy}
+                      disabled={
+                        !scm.canPush || fixedTargetPending || !!scm.actionBusy
+                      }
                       onClick={() => void scm.push()}
                     >
                       {scm.actionBusy === "push" ? "Pushing…" : "Push"}
@@ -733,11 +1022,13 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                             selectedPath={scm.selected?.path ?? null}
                             actionBusy={scm.actionBusy}
                             headerCheckState={scm.headerCheckState}
+                            repoRoot={scm.repo?.repoRoot ?? null}
                             onFocusRow={setFocusedRowKey}
                             onToggleAll={scm.toggleAll}
                             onSelectFile={scm.selectFile}
                             onToggleStageFile={scm.toggleStageFile}
                             onDiscardFile={scm.requestDiscardFile}
+                            onOpenFile={onOpenFile}
                           />
                         </div>
                       );
@@ -829,11 +1120,13 @@ type RowRendererProps = {
   selectedPath: string | null;
   actionBusy: string | null;
   headerCheckState: CheckState;
+  repoRoot: string | null;
   onFocusRow: (key: string | null) => void;
   onToggleAll: () => Promise<void> | void;
   onSelectFile: (entry: SourceControlFileEntry) => Promise<void>;
   onToggleStageFile: (entry: SourceControlFileEntry) => Promise<void>;
   onDiscardFile: (entry: SourceControlFileEntry) => void;
+  onOpenFile?: (absolutePath: string) => void;
 };
 
 const RowRenderer = memo(function RowRenderer(props: RowRendererProps) {
@@ -902,10 +1195,12 @@ const EntryRow = memo(function EntryRow({
   focused,
   selectedPath,
   actionBusy,
+  repoRoot,
   onFocusRow,
   onSelectFile,
   onToggleStageFile,
   onDiscardFile,
+  onOpenFile,
 }: RowRendererProps & {
   row: Extract<RowDescriptor, { kind: "entry" }>;
 }) {
@@ -921,101 +1216,184 @@ const EntryRow = memo(function EntryRow({
   const isDiscardBusy = actionBusy === `discard:${entry.path}`;
   const disabled = actionBusy !== null;
 
+  const absolutePath = repoRoot
+    ? joinPath(repoRoot.replace(/\\/g, "/"), entry.path.replace(/\\/g, "/"))
+    : null;
+  const isDeleted = entry.statusCode === "D";
+  const revealLabel = IS_MAC ? "Reveal in Finder" : "Reveal in File Manager";
+
   return (
-    <div
-      id={`scm-row-${row.key}`}
-      data-focused={focused || undefined}
-      data-selected={isSelected || undefined}
-      role="option"
-      aria-selected={isSelected}
-      onMouseDown={() => onFocusRow(row.key)}
-      className={cn(
-        "group relative flex h-[30px] items-center gap-2 rounded-md pl-2 pr-2 transition-all duration-100",
-        focused
-          ? "bg-accent/60"
-          : isSelected
-            ? "bg-accent/55 text-foreground"
-            : "hover:bg-accent/30",
-      )}
-    >
-      <span
-        className={cn(
-          "pointer-events-none absolute inset-y-1 left-0 w-[2px] rounded-full transition-opacity",
-          statusAccent(entry.statusCode),
-          isSelected || focused
-            ? "opacity-100"
-            : "opacity-55 group-hover:opacity-95",
-        )}
-        aria-hidden
-      />
-      <button
-        type="button"
-        onClick={() => {
-          onFocusRow(row.key);
-          void onSelectFile(entry);
-        }}
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
-      >
-        {iconUrl ? (
-          <img src={iconUrl} alt="" className="size-4 shrink-0" />
-        ) : (
-          <span className="size-4 shrink-0" />
-        )}
-        <div className="flex min-w-0 flex-1 items-baseline gap-1.5 leading-none">
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          id={`scm-row-${row.key}`}
+          data-focused={focused || undefined}
+          data-selected={isSelected || undefined}
+          role="option"
+          aria-selected={isSelected}
+          onMouseDown={() => onFocusRow(row.key)}
+          className={cn(
+            "group relative flex h-[30px] items-center gap-2 rounded-md pl-2 pr-2 transition-all duration-100",
+            focused
+              ? "bg-accent/60"
+              : isSelected
+                ? "bg-accent/55 text-foreground"
+                : "hover:bg-accent/30",
+          )}
+        >
           <span
             className={cn(
-              "truncate text-[12px] leading-tight",
+              "pointer-events-none absolute inset-y-1 left-0 w-[2px] rounded-full transition-opacity",
+              statusAccent(entry.statusCode),
               isSelected || focused
-                ? "font-semibold text-foreground"
-                : "font-medium text-foreground/95",
-              pathLabel ? "max-w-[58%] shrink-0" : "min-w-0 flex-1",
+                ? "opacity-100"
+                : "opacity-55 group-hover:opacity-95",
             )}
+            aria-hidden
+          />
+          <button
+            type="button"
+            onClick={() => {
+              onFocusRow(row.key);
+              void onSelectFile(entry);
+            }}
+            className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
           >
-            {fileName}
-          </span>
-          {pathLabel ? (
-            <span className="min-w-0 flex-1 truncate text-[10.5px] leading-tight text-muted-foreground/75">
-              {pathLabel}
-            </span>
-          ) : null}
-        </div>
-      </button>
+            {iconUrl ? (
+              <img src={iconUrl} alt="" className="size-4 shrink-0" />
+            ) : (
+              <span className="size-4 shrink-0" />
+            )}
+            <div className="flex min-w-0 flex-1 items-baseline gap-1.5 leading-none">
+              <span
+                className={cn(
+                  "truncate text-[12px] leading-tight",
+                  isSelected || focused
+                    ? "font-semibold text-foreground"
+                    : "font-medium text-foreground/95",
+                  pathLabel ? "max-w-[58%] shrink-0" : "min-w-0 flex-1",
+                )}
+              >
+                {fileName}
+              </span>
+              {pathLabel ? (
+                <span className="min-w-0 flex-1 truncate text-[10.5px] leading-tight text-muted-foreground/75">
+                  {pathLabel}
+                </span>
+              ) : null}
+            </div>
+          </button>
 
-      {showDiscard ? (
-        <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 data-[focused=true]:opacity-100 data-[selected=true]:opacity-100">
-          <IconActionButton
-            label={`Discard ${entry.path}`}
-            disabled={disabled}
-            side="top"
-            onClick={() => onDiscardFile(entry)}
-          >
-            {isDiscardBusy ? (
+          {showDiscard ? (
+            <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 data-[focused=true]:opacity-100 data-[selected=true]:opacity-100">
+              <IconActionButton
+                label={`Discard ${entry.path}`}
+                disabled={disabled}
+                side="top"
+                onClick={() => onDiscardFile(entry)}
+              >
+                {isDiscardBusy ? (
+                  <Spinner className="size-3" />
+                ) : (
+                  <HugeiconsIcon
+                    icon={RemoveSquareIcon}
+                    size={11}
+                    strokeWidth={1.9}
+                  />
+                )}
+              </IconActionButton>
+            </div>
+          ) : null}
+
+          <span className="flex size-5 shrink-0 items-center justify-center">
+            {isStageBusy ? (
               <Spinner className="size-3" />
             ) : (
-              <HugeiconsIcon
-                icon={RemoveSquareIcon}
-                size={11}
-                strokeWidth={1.9}
+              <Checkbox
+                aria-label={`Stage ${entry.path}`}
+                checked={checkboxValue(entry.checkState)}
+                disabled={disabled}
+                onCheckedChange={() => void onToggleStageFile(entry)}
+                className="size-3.5"
               />
             )}
-          </IconActionButton>
+          </span>
         </div>
-      ) : null}
+      </ContextMenuTrigger>
 
-      <span className="flex size-5 shrink-0 items-center justify-center">
-        {isStageBusy ? (
-          <Spinner className="size-3" />
-        ) : (
-          <Checkbox
-            aria-label={`Stage ${entry.path}`}
-            checked={checkboxValue(entry.checkState)}
+      <ContextMenuContent className={COMPACT_CONTENT}>
+        {/* Open actions */}
+        <ContextMenuItem
+          className={COMPACT_ITEM}
+          onSelect={() => {
+            onFocusRow(row.key);
+            void onSelectFile(entry);
+          }}
+        >
+          Open Diff
+        </ContextMenuItem>
+        {!isDeleted && onOpenFile && absolutePath ? (
+          <ContextMenuItem
+            className={COMPACT_ITEM}
+            onSelect={() => onOpenFile(absolutePath)}
+          >
+            Open File
+          </ContextMenuItem>
+        ) : null}
+
+        <ContextMenuSeparator />
+
+        {/* Stage / Unstage */}
+        <ContextMenuItem
+          className={COMPACT_ITEM}
+          disabled={disabled}
+          onSelect={() => void onToggleStageFile(entry)}
+        >
+          {entry.checkState === "checked" ? "Unstage" : "Stage"}
+        </ContextMenuItem>
+        {entry.unstaged ? (
+          <ContextMenuItem
+            className={COMPACT_ITEM}
+            variant="destructive"
             disabled={disabled}
-            onCheckedChange={() => void onToggleStageFile(entry)}
-            className="size-3.5"
-          />
-        )}
-      </span>
-    </div>
+            onSelect={() => onDiscardFile(entry)}
+          >
+            Discard Changes
+          </ContextMenuItem>
+        ) : null}
+
+        <ContextMenuSeparator />
+
+        {/* Copy paths */}
+        <ContextMenuItem
+          className={COMPACT_ITEM}
+          onSelect={() => void copyToClipboard(entry.path.replace(/\\/g, "/"))}
+        >
+          Copy Relative Path
+        </ContextMenuItem>
+        {absolutePath ? (
+          <ContextMenuItem
+            className={COMPACT_ITEM}
+            onSelect={() => void copyToClipboard(absolutePath)}
+          >
+            Copy Absolute Path
+          </ContextMenuItem>
+        ) : null}
+
+        {/* Reveal in Finder — only for existing files */}
+        {!isDeleted && absolutePath ? (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              className={COMPACT_ITEM}
+              onSelect={() => void revealInFinder(absolutePath)}
+            >
+              {revealLabel}
+            </ContextMenuItem>
+          </>
+        ) : null}
+      </ContextMenuContent>
+    </ContextMenu>
   );
 });
 

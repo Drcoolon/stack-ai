@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -14,22 +15,33 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import {
+  type OsNotificationResult,
+  testAgentOsNotification,
+} from "@/modules/agents/lib/notify";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { ThemePref } from "@/modules/settings/store";
 import {
-  TERMINAL_FONT_SIZES,
-  TERMINAL_SCROLLBACK_PRESETS,
+  setAgentNotificationSound,
   setAgentNotifications,
   setAutostart,
+  setConfirmCloseRunningTerminal,
+  setDefaultWorkspaceEnv,
+  setExplorerGitDecorations,
   setRestoreWindowState,
   setShowHidden,
+  setTerminalCursorBlink,
+  setTerminalCursorStyle,
   setTerminalFontFamily,
-  setTerminalLetterSpacing,
   setTerminalFontSize,
+  setTerminalFontWeight,
+  setTerminalLetterSpacing,
   setTerminalScrollback,
+  setTerminalShell,
   setTerminalWebglEnabled,
-  setVimMode,
   setZoomLevel,
+  TERMINAL_FONT_SIZES,
+  TERMINAL_SCROLLBACK_PRESETS,
 } from "@/modules/settings/store";
 import { useTheme } from "@/modules/theme";
 import {
@@ -38,8 +50,9 @@ import {
   Sun03Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { invoke } from "@tauri-apps/api/core";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
 import { SettingRow } from "../components/SettingRow";
 
@@ -53,29 +66,78 @@ const APPEARANCE: {
   { id: "dark", label: "Dark", icon: Moon02Icon },
 ];
 
+const TERMINAL_FONT_WEIGHTS = [
+  { value: "normal", label: "Normal" },
+  { value: "500", label: "Medium" },
+  { value: "600", label: "Semi-Bold" },
+  { value: "bold", label: "Bold" },
+] as const;
+const TERMINAL_CURSOR_STYLES = [
+  { value: "bar", label: "Bar" },
+  { value: "block", label: "Block" },
+  { value: "underline", label: "Underline" },
+] as const;
 const LETTER_SPACINGS = [-4, -3, -2, -1, 0, 1, 2, 3, 4] as const;
+
+type ShellInfo = { name: string; path: string; integrated: boolean };
+const SHELL_AUTO = "auto";
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 2.0;
 const ZOOM_STEP = 0.05;
+const NOTIFICATION_TEST_DELAY_MS = 2_000;
+
+type NotificationTestState =
+  | OsNotificationResult
+  | "idle"
+  | "waiting"
+  | "sending";
 
 export function GeneralSection() {
   const { mode, setMode } = useTheme();
 
   const autostart = usePreferencesStore((s) => s.autostart);
   const restoreWindowState = usePreferencesStore((s) => s.restoreWindowState);
-  const vimMode = usePreferencesStore((s) => s.vimMode);
   const showHidden = usePreferencesStore((s) => s.showHidden);
+  const explorerGitDecorations = usePreferencesStore(
+    (s) => s.explorerGitDecorations,
+  );
   const terminalWebglEnabled = usePreferencesStore(
     (s) => s.terminalWebglEnabled,
   );
+  const terminalCursorBlink = usePreferencesStore((s) => s.terminalCursorBlink);
+  const terminalCursorStyle = usePreferencesStore((s) => s.terminalCursorStyle);
   const terminalFontFamily = usePreferencesStore((s) => s.terminalFontFamily);
+  const terminalFontWeight = usePreferencesStore((s) => s.terminalFontWeight);
+  const terminalShell = usePreferencesStore((s) => s.terminalShell);
+  const [shells, setShells] = useState<ShellInfo[]>([]);
+  const [wslDistros, setWslDistros] = useState<{ name: string }[]>([]);
+  const defaultWorkspaceEnv = usePreferencesStore((s) => s.defaultWorkspaceEnv);
   const terminalLetterSpacing = usePreferencesStore(
     (s) => s.terminalLetterSpacing,
   );
   const terminalFontSize = usePreferencesStore((s) => s.terminalFontSize);
   const terminalScrollback = usePreferencesStore((s) => s.terminalScrollback);
+  const confirmCloseRunningTerminal = usePreferencesStore(
+    (s) => s.confirmCloseRunningTerminal,
+  );
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
   const agentNotifications = usePreferencesStore((s) => s.agentNotifications);
+  const agentNotificationSound = usePreferencesStore(
+    (s) => s.agentNotificationSound,
+  );
+  const [notificationTest, setNotificationTest] =
+    useState<NotificationTestState>("idle");
+  const notificationTestPending =
+    notificationTest === "waiting" || notificationTest === "sending";
+
+  const testNotification = async () => {
+    setNotificationTest("waiting");
+    await new Promise((resolve) =>
+      setTimeout(resolve, NOTIFICATION_TEST_DELAY_MS),
+    );
+    setNotificationTest("sending");
+    setNotificationTest(await testAgentOsNotification(agentNotificationSound));
+  };
 
   useEffect(() => {
     let alive = true;
@@ -92,6 +154,15 @@ export function GeneralSection() {
     };
   }, []);
 
+  useEffect(() => {
+    void invoke<ShellInfo[]>("pty_list_shells")
+      .then(setShells)
+      .catch(() => {});
+    void invoke<{ name: string }[]>("wsl_list_distros")
+      .then(setWslDistros)
+      .catch(() => {});
+  }, []);
+
   const onToggleAutostart = async (next: boolean) => {
     try {
       if (next) await enable();
@@ -106,7 +177,7 @@ export function GeneralSection() {
     <div className="flex flex-col gap-6">
       <SectionHeader
         title="General"
-        description="Mode, editor, and startup."
+        description="Mode, terminal, and startup."
       />
 
       <div className="flex flex-col gap-2">
@@ -157,19 +228,6 @@ export function GeneralSection() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Editor</Label>
-        <SettingRow
-          title="Vim mode"
-          description="Enable Vim keybindings in the code editor."
-        >
-          <Switch
-            checked={vimMode}
-            onCheckedChange={(v) => void setVimMode(v)}
-          />
-        </SettingRow>
-      </div>
-
-      <div className="flex flex-col gap-2">
         <Label>Explorer</Label>
         <SettingRow
           title="Show hidden files"
@@ -178,6 +236,15 @@ export function GeneralSection() {
           <Switch
             checked={showHidden}
             onCheckedChange={(v) => void setShowHidden(v)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Git decorations"
+          description="Tint changed files and dim gitignored entries in the file explorer."
+        >
+          <Switch
+            checked={explorerGitDecorations}
+            onCheckedChange={(v) => void setExplorerGitDecorations(v)}
           />
         </SettingRow>
       </div>
@@ -198,15 +265,12 @@ export function GeneralSection() {
                       ⓘ
                     </span>
                   </TooltipTrigger>
-                  <TooltipContent
-                    side="top"
-                    className="max-w-65 text-[11px]"
-                  >
-                    xterm's WebGL renderer caches glyphs in a GPU texture
-                    atlas. On some macOS setups (especially with Nerd Fonts),
-                    the atlas corrupts and terminal text becomes unreadable.
-                    Turn this off as a fallback — performance dips slightly,
-                    but text renders correctly via the DOM renderer.
+                  <TooltipContent side="top" className="max-w-65 text-[11px]">
+                    xterm's WebGL renderer caches glyphs in a GPU texture atlas.
+                    On some macOS setups (especially with Nerd Fonts), the atlas
+                    corrupts and terminal text becomes unreadable. Turn this off
+                    as a fallback — performance dips slightly, but text renders
+                    correctly via the DOM renderer.
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -220,17 +284,149 @@ export function GeneralSection() {
           />
         </SettingRow>
         <SettingRow
-          title="Font family"
-          description='Nerd Font name for icons (e.g. "CaskaydiaCove Nerd Font Mono"). Leave blank to auto-detect.'
+          title="Cursor blinking"
+          description="Blink the terminal cursor. Off by default for lower idle CPU, matching VS Code and the macOS terminal."
         >
-          <input
-            type="text"
-            value={terminalFontFamily}
-            placeholder="Auto-detect"
-            onChange={(e) => void setTerminalFontFamily(e.target.value)}
-            className="h-8 w-48 rounded-md border border-border bg-background px-2.5 text-[12px] outline-none focus:border-foreground/40"
+          <Switch
+            checked={terminalCursorBlink}
+            onCheckedChange={(v) => void setTerminalCursorBlink(v)}
           />
         </SettingRow>
+        <SettingRow
+          title="Cursor style"
+          description="Shape of the terminal cursor."
+        >
+          <Select
+            value={terminalCursorStyle}
+            onValueChange={(v) => void setTerminalCursorStyle(v)}
+          >
+            <SelectTrigger
+              value={terminalCursorStyle}
+              className="h-8 w-28 text-[12px]"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TERMINAL_CURSOR_STYLES.map((style) => (
+                <SelectItem
+                  key={style.value}
+                  value={style.value}
+                  className="text-[12px]"
+                >
+                  {style.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        <FontFamilyInput
+          value={terminalFontFamily}
+          onCommit={(v) => void setTerminalFontFamily(v)}
+        />
+        <SettingRow
+          title="Font weight"
+          description="Thickness of terminal characters"
+        >
+          <Select
+            value={terminalFontWeight}
+            onValueChange={(v) => void setTerminalFontWeight(v)}
+          >
+            <SelectTrigger
+              value={terminalFontWeight}
+              className="h-8 w-28 text-[12px]"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TERMINAL_FONT_WEIGHTS.map((w) => (
+                <SelectItem
+                  key={w.value}
+                  value={w.value}
+                  className="text-[12px]"
+                >
+                  {w.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        <SettingRow
+          title="Integrated terminal shell"
+          description={
+            shells.find((s) => s.path === terminalShell)?.integrated === false
+              ? "Command blocks and directory tracking are unavailable for this shell."
+              : wslDistros.length > 0
+                ? "Shell for the integrated terminal. WSL spaces use the distro login shell. Existing tabs keep their shell."
+                : "Shell for new terminal tabs. Existing tabs keep their shell."
+          }
+        >
+          <Select
+            value={terminalShell || SHELL_AUTO}
+            onValueChange={(v) =>
+              void setTerminalShell(v === SHELL_AUTO ? "" : v)
+            }
+          >
+            <SelectTrigger
+              value={terminalShell || SHELL_AUTO}
+              className="h-8 w-40 text-[12px]"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={SHELL_AUTO} className="text-[12px]">
+                Auto
+              </SelectItem>
+              {shells.map((s) => (
+                <SelectItem key={s.path} value={s.path} className="text-[12px]">
+                  {s.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        {(wslDistros.length > 0 || defaultWorkspaceEnv !== "local") && (
+          <SettingRow
+            title="Workspace environment"
+            description="Where new spaces run, terminal and AI agent alike: Windows or a WSL distro. Existing spaces keep theirs; switch any from the status bar."
+          >
+            <Select
+              value={defaultWorkspaceEnv}
+              onValueChange={(v) => void setDefaultWorkspaceEnv(v)}
+            >
+              <SelectTrigger
+                value={defaultWorkspaceEnv}
+                className="h-8 w-40 text-[12px]"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="local" className="text-[12px]">
+                  Windows
+                </SelectItem>
+                {wslDistros.map((d) => (
+                  <SelectItem
+                    key={d.name}
+                    value={`wsl:${d.name}`}
+                    className="text-[12px]"
+                  >
+                    WSL: {d.name}
+                  </SelectItem>
+                ))}
+                {defaultWorkspaceEnv.startsWith("wsl:") &&
+                  !wslDistros.some(
+                    (d) => `wsl:${d.name}` === defaultWorkspaceEnv,
+                  ) && (
+                    <SelectItem
+                      value={defaultWorkspaceEnv}
+                      className="text-[12px]"
+                    >
+                      {defaultWorkspaceEnv.slice("wsl:".length)} (unavailable)
+                    </SelectItem>
+                  )}
+              </SelectContent>
+            </Select>
+          </SettingRow>
+        )}
         <SettingRow
           title="Letter spacing"
           description="Extra horizontal space between characters (px). Use negative values to tighten Nerd Fonts."
@@ -261,7 +457,11 @@ export function GeneralSection() {
             </SelectTrigger>
             <SelectContent>
               {TERMINAL_FONT_SIZES.map((size) => (
-                <SelectItem key={size} value={String(size)} className="text-[12px]">
+                <SelectItem
+                  key={size}
+                  value={String(size)}
+                  className="text-[12px]"
+                >
                   {size} px
                 </SelectItem>
               ))}
@@ -292,17 +492,52 @@ export function GeneralSection() {
             </SelectContent>
           </Select>
         </SettingRow>
+        <SettingRow
+          title="Confirm before killing a running process"
+          description="Ask before closing a terminal tab or quitting while a command is still running. Unsaved editor changes are always confirmed."
+        >
+          <Switch
+            checked={confirmCloseRunningTerminal}
+            onCheckedChange={(v) => void setConfirmCloseRunningTerminal(v)}
+          />
+        </SettingRow>
       </div>
 
       <div className="flex flex-col gap-2">
         <Label>Agents</Label>
         <SettingRow
           title="Coding agent notifications"
-          description="Alert when Claude Code or Codex running in a terminal needs your input or finishes. Desktop notification when Terax is unfocused, in-app otherwise."
+          description="Alert when a coding agent needs your input or finishes. Native notification when Terax is unfocused, in-app otherwise."
+        >
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              disabled={!agentNotifications || notificationTestPending}
+              title={notificationTestTitle(notificationTest)}
+              onClick={() => void testNotification()}
+            >
+              {notificationTestLabel(notificationTest)}
+            </Button>
+            <Switch
+              checked={agentNotifications}
+              disabled={notificationTestPending}
+              onCheckedChange={(v) => {
+                setNotificationTest("idle");
+                void setAgentNotifications(v);
+              }}
+            />
+          </div>
+        </SettingRow>
+        <SettingRow
+          title="Notification sound"
+          description="Play a sound with agent notifications and in-app alerts."
         >
           <Switch
-            checked={agentNotifications}
-            onCheckedChange={(v) => void setAgentNotifications(v)}
+            checked={agentNotificationSound}
+            disabled={!agentNotifications || notificationTestPending}
+            onCheckedChange={(v) => void setAgentNotificationSound(v)}
           />
         </SettingRow>
       </div>
@@ -339,5 +574,78 @@ function Label({ children }: { children: React.ReactNode }) {
     <span className="text-[11px] font-medium tracking-tight text-muted-foreground">
       {children}
     </span>
+  );
+}
+
+function notificationTestLabel(status: NotificationTestState): string {
+  switch (status) {
+    case "waiting":
+      return "Switch apps...";
+    case "sending":
+      return "Sending...";
+    case "requested":
+      return "Requested";
+    case "denied":
+      return "Blocked";
+    case "failed":
+      return "Failed";
+    default:
+      return "Test in 2s";
+  }
+}
+
+function notificationTestTitle(status: NotificationTestState): string {
+  switch (status) {
+    case "waiting":
+      return "Switch to another app to verify native delivery";
+    case "requested":
+      return "The native notification was requested";
+    case "denied":
+      return "Notifications are disabled by the system";
+    case "failed":
+      return "Terax could not request a native notification";
+    default:
+      return "Send a native test notification after two seconds";
+  }
+}
+
+function FontFamilyInput({
+  value,
+  onCommit,
+}: {
+  value: string;
+  onCommit: (v: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  // Commit (and trim) only on blur/Enter so a trailing space can be typed
+  // mid-edit, e.g. "JetBrains Mono ".
+  const commit = () => {
+    const next = draft.trim();
+    if (next !== draft) setDraft(next);
+    if (next !== value) onCommit(next);
+  };
+
+  return (
+    <SettingRow
+      title="Font family"
+      description='Nerd Font name for icons (e.g. "CaskaydiaCove Nerd Font Mono"). Leave blank to auto-detect.'
+    >
+      <input
+        type="text"
+        value={draft}
+        placeholder="Auto-detect"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+        className="h-8 w-48 rounded-md border border-border bg-background px-2.5 text-[12px] outline-none focus:border-foreground/40"
+      />
+    </SettingRow>
   );
 }

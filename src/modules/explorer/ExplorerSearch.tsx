@@ -15,7 +15,6 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { currentWorkspaceEnv } from "@/modules/workspace";
-import { motion } from "motion/react";
 import {
   forwardRef,
   useEffect,
@@ -51,6 +50,8 @@ type Props = {
   onRequestClose: () => void;
   onActiveChange?: (active: boolean) => void;
   onRevealInTerminal?: (path: string) => void;
+  onOpenInSourceControl?: (path: string) => void;
+  onOpenGitHistory?: (path: string) => void;
   onAttachToAgent?: (path: string) => void;
 };
 
@@ -66,6 +67,8 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
   onRequestClose,
   onActiveChange,
   onRevealInTerminal,
+  onOpenInSourceControl,
+  onOpenGitHistory,
   onAttachToAgent,
 }: Props,
   ref,
@@ -168,13 +171,9 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
   };
 
   return (
-    <div className="flex flex-col">
+    <div className={cn("flex flex-col", active && "min-h-0 flex-1")}>
       {open ? (
-        <motion.div
-          className="relative shrink-0 px-2 py-1.5"
-          initial={{ opacity: 0, transform: "translateY(-15px)" }}
-          animate={{ opacity: 1, transform: "translateY(0px)" }}
-        >
+        <div className="relative shrink-0 px-2 py-1.5 animate-in fade-in-0 slide-in-from-top-3 duration-200 ease-out">
           <HugeiconsIcon
             icon={Search01Icon}
             size={13}
@@ -222,7 +221,7 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
               <HugeiconsIcon icon={Cancel01Icon} size={11} strokeWidth={2} />
             </button>
           ) : null}
-        </motion.div>
+        </div>
       ) : null}
 
       {active ? (
@@ -289,6 +288,22 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
                           onSelect={() => onRevealInTerminal(hit.path)}
                         >
                           Open in Terminal
+                        </ContextMenuItem>
+                      )}
+                      {hit.is_dir && onOpenInSourceControl && (
+                        <ContextMenuItem
+                          className={COMPACT_ITEM}
+                          onSelect={() => onOpenInSourceControl(hit.path)}
+                        >
+                          Open in Source Control
+                        </ContextMenuItem>
+                      )}
+                      {hit.is_dir && onOpenGitHistory && (
+                        <ContextMenuItem
+                          className={COMPACT_ITEM}
+                          onSelect={() => onOpenGitHistory(hit.path)}
+                        >
+                          Open Git History
                         </ContextMenuItem>
                       )}
                       <ContextMenuItem

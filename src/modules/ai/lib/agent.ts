@@ -4,26 +4,28 @@ import {
   stepCountIs,
   streamText,
   type LanguageModel,
-  type ModelMessage,
   type UIMessage,
 } from "ai";
 import {
   DEFAULT_MODEL_ID,
-  getModel,
+  endpointIdFromCompatModel,
   getModelContextLimit,
+  isCompatModelId,
   LMSTUDIO_DEFAULT_BASE_URL,
   MAX_AGENT_STEPS,
   MLX_DEFAULT_BASE_URL,
   modelKeepsReasoning,
   OLLAMA_DEFAULT_BASE_URL,
   providerNeedsKey,
+  resolveModel,
   selectSystemPrompt,
-  type ModelId,
+  type CustomEndpoint,
   type ProviderId,
 } from "../config";
 import { buildTools, type ToolContext } from "../tools/tools";
 import { compactModelMessagesDetailed } from "./compact";
-import type { ProviderKeys } from "./keyring";
+import type { ProviderKeys, CustomEndpointKeys } from "./keyring";
+import { prepareAgentPrompt } from "./prompt";
 import { createProxyFetch } from "./proxyFetch";
 
 const localProxyFetch = createProxyFetch({ allowPrivateNetwork: true });
@@ -76,6 +78,7 @@ export async function buildLanguageModel(
   keys: ProviderKeys,
   resolvedModelId: string,
   options: BuildModelOptions = {},
+  customEndpointKey?: string | null,
 ): Promise<LanguageModel> {
   if (providerNeedsKey(provider) && !keys[provider]) {
     throw new Error(
@@ -87,7 +90,8 @@ export async function buildLanguageModel(
   const mlxURL = options.mlxBaseURL ?? MLX_DEFAULT_BASE_URL;
   const ollamaURL = options.ollamaBaseURL ?? OLLAMA_DEFAULT_BASE_URL;
   const compatURL = options.openaiCompatibleBaseURL ?? "";
-  const cacheKey = `${provider} ${key} ${resolvedModelId} ${lmstudioURL} ${mlxURL} ${ollamaURL} ${compatURL}`;
+  const epKey = customEndpointKey ?? "";
+  const cacheKey = `${provider} ${key} ${epKey} ${resolvedModelId} ${lmstudioURL} ${mlxURL} ${ollamaURL} ${compatURL}`;
   const hit = modelCache.get(cacheKey);
   if (hit) return hit;
 
@@ -168,7 +172,7 @@ export async function buildLanguageModel(
       built = createOpenAICompatible({
         name: "openai-compatible",
         baseURL: compatURL,
-        apiKey: key || undefined,
+        apiKey: epKey || key || undefined,
         fetch: localProxyFetch,
       })(resolvedModelId);
       break;
@@ -222,14 +226,33 @@ export type LocalProviderConfig = {
   openaiCompatibleBaseURL?: string;
   openaiCompatibleModelId?: string;
   openrouterModelId?: string;
+  customEndpoints?: readonly CustomEndpoint[];
+  customEndpointKeys?: CustomEndpointKeys;
 };
 
 export function buildConfiguredLanguageModel(
-  modelId: ModelId,
+  modelId: string,
   keys: ProviderKeys,
   local: LocalProviderConfig = {},
 ): Promise<LanguageModel> {
-  const m = getModel(modelId);
+  if (isCompatModelId(modelId)) {
+    const eid = endpointIdFromCompatModel(modelId);
+    const ep = local.customEndpoints?.find((e) => e.id === eid);
+    if (!ep) throw new Error(`Custom endpoint not found: ${eid}`);
+    if (!ep.modelId.trim()) {
+      throw new Error(
+        `${ep.name}: no model id set. Open Settings → Models.`,
+      );
+    }
+    return buildLanguageModel(
+      "openai-compatible",
+      keys,
+      ep.modelId.trim(),
+      { openaiCompatibleBaseURL: ep.baseURL },
+      local.customEndpointKeys?.[eid],
+    );
+  }
+  const m = resolveModel(modelId);
   let resolvedId: string = m.id;
   if (m.id === "lmstudio-local") {
     if (!local.lmstudioModelId?.trim()) {
@@ -262,7 +285,7 @@ export function buildConfiguredLanguageModel(
   } else if (m.id === "openrouter-custom") {
     if (!local.openrouterModelId?.trim()) {
       throw new Error(
-        "OpenRouter: no model id set. Open Settings → Models and enter an OpenRouter model id (e.g. anthropic/claude-sonnet-4-6).",
+        "OpenRouter: no model id set. Open Settings → Models and enter an OpenRouter model id (e.g. anthropic/claude-sonnet-5).",
       );
     }
     resolvedId = local.openrouterModelId.trim();
@@ -279,12 +302,12 @@ const PLAN_MODE_PROMPT = `## PLAN MODE — ACTIVE
 Mutating tools (write_file, edit, multi_edit, create_directory) will queue their changes for the user to review as a single diff. Do NOT execute bash_run or bash_background while plan mode is active — restrict yourself to reads (read_file, grep, glob, list_directory) and the queued mutations. After queueing the full set of edits, stop and return a brief summary; do not continue acting until the user has accepted/rejected.`;
 
 function buildStableSystem(
-  modelId: ModelId,
+  modelId: string,
   persona: { name: string; instructions: string } | null,
   customInstructions: string | undefined,
   projectMemory: string | null,
 ): string {
-  const base = selectSystemPrompt(getModel(modelId).id);
+  const base = selectSystemPrompt(modelId);
   const personaBlock = persona?.instructions.trim()
     ? `\n\n## ACTIVE AGENT — ${persona.name}\n${persona.instructions.trim()}`
     : "";
@@ -296,28 +319,6 @@ function buildStableSystem(
       ? `\n\n## PROJECT — TERAX.md\n${projectMemory.trim()}`
       : "";
   return `${base}${memoryBlock}${personaBlock}${customBlock}`;
-}
-
-// OpenAI / Gemini / DeepSeek apply prefix caching automatically; only
-// Anthropic needs explicit breakpoints. Mark the stable system prefix and
-// the rotating conversation tail.
-function applyCacheBreakpoints(
-  messages: ModelMessage[],
-  provider: ProviderId,
-): ModelMessage[] {
-  if (provider !== "anthropic" || messages.length === 0) return messages;
-  const marker = {
-    anthropic: { cacheControl: { type: "ephemeral" as const } },
-  };
-  const withMarker = (m: ModelMessage): ModelMessage => ({
-    ...m,
-    providerOptions: { ...(m.providerOptions ?? {}), ...marker },
-  });
-  const out = messages.slice();
-  out[0] = withMarker(out[0]);
-  const lastIdx = out.length - 1;
-  if (lastIdx > 0) out[lastIdx] = withMarker(out[lastIdx]);
-  return out;
 }
 
 export type AgentUsage = {
@@ -339,7 +340,7 @@ const EMPTY_USAGE: AgentUsage = {
 
 export type RunAgentOptions = {
   keys: ProviderKeys;
-  modelId?: ModelId;
+  modelId?: string;
   customInstructions?: string;
   agentPersona?: { name: string; instructions: string } | null;
   toolContext: ToolContext;
@@ -357,6 +358,8 @@ export type RunAgentOptions = {
   openaiCompatibleModelId?: string;
   openaiCompatibleContextLimit?: number;
   openrouterModelId?: string;
+  customEndpoints?: readonly CustomEndpoint[];
+  customEndpointKeys?: CustomEndpointKeys;
   planMode?: boolean;
   projectMemory?: string | null;
   uiMessages: UIMessage[];
@@ -375,8 +378,12 @@ export async function runAgentStream(opts: RunAgentOptions) {
     openaiCompatibleBaseURL: opts.openaiCompatibleBaseURL,
     openaiCompatibleModelId: opts.openaiCompatibleModelId,
     openrouterModelId: opts.openrouterModelId,
+    customEndpoints: opts.customEndpoints,
+    customEndpointKeys: opts.customEndpointKeys,
   });
-  const provider = getModel(modelId).provider;
+  const endpoints = opts.customEndpoints ?? [];
+  const info = resolveModel(modelId, endpoints);
+  const provider = info.provider;
 
   const stableSystem = buildStableSystem(
     modelId,
@@ -386,35 +393,38 @@ export async function runAgentStream(opts: RunAgentOptions) {
   );
 
   const history = await convertToModelMessages(opts.uiMessages);
+  const keepsReasoning = modelKeepsReasoning(info);
   const prunedHistory = pruneMessages({
     messages: history,
-    reasoning: modelKeepsReasoning(modelId) ? "none" : "before-last-message",
+    reasoning: keepsReasoning ? "none" : "before-last-message",
     emptyMessages: "remove",
   });
+  const compatCtxOverride = isCompatModelId(modelId)
+    ? endpoints.find((e) => e.id === endpointIdFromCompatModel(modelId))
+        ?.contextLimit
+    : opts.openaiCompatibleContextLimit;
   const compact = compactModelMessagesDetailed(
     prunedHistory,
-    getModelContextLimit(
-      getModel(modelId).id,
-      opts.openaiCompatibleContextLimit,
-    ),
+    getModelContextLimit(modelId, compatCtxOverride),
   );
   const compactedHistory = compact.messages;
   if (compact.compacted) {
     opts.onCompact?.({ droppedCount: compact.droppedCount });
   }
 
-  const messages: ModelMessage[] = [{ role: "system", content: stableSystem }];
-  if (opts.planMode) {
-    messages.push({ role: "system", content: PLAN_MODE_PROMPT });
-  }
-  messages.push(...compactedHistory);
-
-  const finalMessages = applyCacheBreakpoints(messages, provider);
+  const prompt = prepareAgentPrompt(
+    stableSystem,
+    opts.planMode ? PLAN_MODE_PROMPT : null,
+    compactedHistory,
+    provider,
+  );
 
   let stepsSeen = 0;
   return streamText({
     model,
-    messages: finalMessages,
+    system: prompt.system,
+    messages: prompt.messages,
+    allowSystemInMessages: false,
     tools: buildTools(opts.toolContext),
     stopWhen: stepCountIs(MAX_AGENT_STEPS),
     abortSignal: opts.abortSignal,
